@@ -1,0 +1,23 @@
+{
+    "name": "cupoftea/cardcast",
+    "description": "CardCast API library",
+    "keywords": ["CardCast", "Cards Against Humanity", "API", "library"],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "CupOfTea696",
+            "email": "cupoftea696@gmail.com"
+        }
+    ],
+    "require": {
+        "cupoftea/package": "^1.2",
+        "cupoftea/support": "^1.1",
+        "guzzlehttp/guzzle": "^6.1"
+    },
+    "autoload": {
+        "psr-4": {
+            "CupOfTea\\CardCast\\": "src/"
+        }
+    },
+    "minimum-stability": "stable"
+}

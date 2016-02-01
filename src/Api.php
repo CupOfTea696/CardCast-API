@@ -1,5 +1,6 @@
 <?php namespace CupOfTea\CardCast;
 
+use GuzzleHttp\Psr7\Stream;
 use Illuminate\Support\Str;
 use CupOfTea\Package\Package;
 use GuzzleHttp\ClientInterface;
@@ -9,13 +10,17 @@ abstract class Api
 {
     protected $api = [];
     
-    protected $options = [
-        'decode_content' => 'gzip',
+    protected $options = [];
+    
+    protected $methods = [
+        'index' => 'GET',
+        'create' => 'POST',
+        'get' => 'GET',
+        'edit' => 'PUT',
+        'delete' => 'DELETE',
     ];
     
-    protected $queryTrueValue = 1;
-    
-    protected $querFalseValue = 0;
+    protected $bodyAsJson = true;
     
     protected $cc_api = [
         'base' => 'https://api.cardcastgame.com',
@@ -29,15 +34,6 @@ abstract class Api
                 'responses' => 'decks/:playcode/responses',
             ],
         ],
-        'properties' => [
-            'v1' => [
-                'offset' => ['deck.index'],
-                'limit' => ['deck.index'],
-                'author' => ['deck.index'],
-                'category' => ['deck.index'],
-                'search' => ['deck.index'],
-            ]
-        ],
     ];
     
     private $actions = [
@@ -50,11 +46,11 @@ abstract class Api
     
     private $definition;
     
-    private $client;
+    private $client = [];
     
     private $endpoint;
     
-    private $query;
+    private $query = [];
     
     final public function __construct(ApiDefinition $definition = null)
     {
@@ -68,12 +64,12 @@ abstract class Api
     
     public function isVersioned()
     {
-        return (bool) count($this->api()->versions);
+        return (bool) is_array($this->api()->versions) && count($this->api()->versions);
     }
     
     public function hasVersion($version)
     {
-        return in_array($version, $this->api()->versions);
+        return is_array($this->api()->versions) && in_array($version, $this->api()->versions);
     }
     
     public function getVersion()
@@ -97,6 +93,10 @@ abstract class Api
         if (! $this->hasVersion($version)) {
             throw new InvaidArgumentException('There is no version ' . $version);
         }
+        
+        $this->api()->version = $version;
+        $this->endpoint = null;
+        $this->query = [];
     }
     
     final protected function api()
@@ -111,18 +111,41 @@ abstract class Api
     
     final protected function getClient()
     {
+        if ($this->isVersioned()) {
+            return $this->getVersionedClient();
+        } else {
+            return $this->getUnversionedClient();
+        }
+    }
+    
+    private function getVersionedClient()
+    {
+        if (isset($this->client[$this->getVersion()])) {
+            return $this->client[$this->getVersion()];
+        }
+        
+        return $this->client[$this->getVersion()] = $this->createClient();
+    }
+    
+    private function getUnversionedClient()
+    {
         if (isset($this->client)) {
             return $this->client;
         }
         
-        $options = $this->options;
-        $options['headers'] = array_merge($this->getDefaultHeaders($options), array_get($options, 'headers', []));
-        $options['base_uri'] = $this->getBaseUri();
-        
-        return $this->client = new HttpClient($options);
+        return $this->client = $this->createClient();
     }
     
-    private function getDefaultHeaders($options)
+    private function createClient()
+    {
+        $options = $this->options;
+        $options['headers'] = $this->getHeaders();
+        $options['base_uri'] = $this->getBaseUri();
+        
+        return new HttpClient($options);
+    }
+    
+    private function getHeaders()
     {
         $userAgent  = get_class($this);
         $userAgent .= ' Guzzle/' . ClientInterface::VERSION;
@@ -133,17 +156,20 @@ abstract class Api
         
         $userAgent .= ' PHP/' . PHP_VERSION;
         
-        if (array_get($options, 'decode_content') == 'gzip' || array_get($options, 'headers.Accept-Encoding' == 'gzip')) {
-            $userAgent .= ' (gzip)';
-        }
-        
-        return [
+        $default = [
             'Accept' => 'application/json',
             'User-Agent' => $userAgent,
         ];
+        
+        return array_merge($default, array_get($options, 'headers', []));
     }
     
-    // API::endpoint([])->query1()->query2()->action()
+    private function getMethod($action)
+    {
+        return array_get($this->methods, $this->resolveAction($action), 'GET');
+    }
+    
+    // API::endpoint(q[])->query1()->query2()->action(playcode, q[])
     final public function __call($method, $arguments)
     {
         if (is_null($this->endpoint)) {
@@ -155,12 +181,51 @@ abstract class Api
             
             return $this;
         } elseif ($this->isAction($method)) {
-            // Execute API Request.
+            $uriParams = array_get($arguments, 0);
+            
+            $client = $this->getClient();
+            $action = $this->resolveAction($method);
+            $method = $this->getMethod($action);
+            $endpoint = $this->getEndpoint($action, $uriParams);
+            
+            switch ($method) {
+                case 'POST':
+                case 'PUT':
+                    $body = array_get($arguments, 1);
+                    $query = array_get($arguments, 2);
+                    break;
+                default:
+                    $body = null;
+                    $query = array_get($arguments, 1);
+                    break;
+            }
+            
+            $options = [];
+            
+            if ($query) {
+                $this->setQuery($query);
+            }
+            
+            if ($this->query) {
+                $options['query'] = $this->query;
+            }
+            
+            if (is_array($body)) {
+                if ($this->bodyAsJson) {
+                    $options['json'] => $body;
+                } else {
+                    $options['form_params'] => $body;
+                }
+            } elseif (is_string($body) || is_resource($body) || $body instanceof Stream) {
+                $options['body'] = $body;
+            }
+            
+            $response = $client->request($method, $endpoint, $options);
             
             return;
         }
         
-        $this->setQuery($method, array_get($arguments, 0, $this->queryTrueValue));
+        $this->setQuery($method, array_get($arguments, 0, true));
         
         return $this;
     }
@@ -183,26 +248,21 @@ abstract class Api
         }
         
         $value = value($value);
-        $value = is_bool($value) ? $this->queryBoolValue($value) : $value;
         
         $this->query[$key] = $value;
         
         return $this;
     }
     
-    private function queryBoolValue($value)
-    {
-        return $value ? $this->queryTrueValue : $this->queryFalseValue;
-    }
-    
     private function isAction($method)
     {
-        return in_array($this->resolveAction($method), $this->actions);
+        return in_array($this->resolveAction($method), array_unique(array_merge($this->actions, array_keys($this->methods))));
     }
     
     private function resolveAction($action)
     {
         switch ($action) {
+            case 'all':
             case 'list':
                 return 'index';
             case 'store':
